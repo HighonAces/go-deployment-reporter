@@ -1,0 +1,130 @@
+# 1. Namespace: Isolates the application resources.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: go-reporter-ns
+
+---
+# 2. ServiceAccount: Provides an identity for pods running the application.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: go-reporter-sa
+  namespace: go-reporter-ns
+
+---
+# 3. Role: Defines the permissions the application needs.
+# Based on your code, it needs to 'get' deployments and 'list' pod metrics.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: go-reporter-role
+  namespace: go-reporter-ns
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+# 4. RoleBinding: Grants the permissions in the Role to the ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: go-reporter-rolebinding
+  namespace: go-reporter-ns
+subjects:
+  - kind: ServiceAccount
+    name: go-reporter-sa
+    namespace: go-reporter-ns
+roleRef:
+  kind: Role
+  name: go-reporter-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# 5. Deployment: Manages the application pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-deployment-reporter
+  namespace: go-reporter-ns # Deploys into the new namespace
+  labels:
+    app: go-deployment-reporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: go-deployment-reporter
+  template:
+    metadata:
+      labels:
+        app: go-deployment-reporter
+    spec:
+      serviceAccountName: go-reporter-sa # Assigns the service account to the pod
+      containers:
+        - name: reporter
+          image: ttl.sh/go-deployment-reporter:10d
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DEPLOYMENT_NAME
+              value: "go-deployment-reporter"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: COLLECTION_INTERVAL_SECONDS
+              value: "1"
+            - name: PROMETHEUS_URL
+              value: "http://kube-prom-stack-kube-prome-prometheus.monitoring.svc.cluster.local:9090"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+---
+# 6. Service: Exposes the deployment within the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-deployment-reporter-svc
+  namespace: go-reporter-ns # Exists in the new namespace
+spec:
+  selector:
+    app: go-deployment-reporter
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# 7. HorizontalPodAutoscaler: Automatically scales the deployment.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: go-deployment-reporter-hpa
+  namespace: go-reporter-ns # Exists in the new namespace
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: go-deployment-reporter
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

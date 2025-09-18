@@ -22,7 +22,7 @@ func GetConcurrentRequests(promAPI prometheusv1.API) (int64, error) {
 	// IMPORTANT: This assumes your Prometheus is configured to add a 'deployment' label
 	// to the metrics it scrapes, which is common when using the Prometheus Operator.
 	// You may need to adjust the label (e.g., to 'app' or 'k8s_app').
-	query := fmt.Sprintf(`sum(http_in_flight_requests{deployment="%s"})`, deploymentName)
+	query := fmt.Sprintf(`concurrent_http_requests_total{deployment="%s"}`, deploymentName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
