@@ -66,7 +66,7 @@ spec:
       serviceAccountName: go-reporter-sa # Assigns the service account to the pod
       containers:
         - name: reporter
-          image: ttl.sh/go-deployment-reporter:10d
+          image: ttl.sh/go-deployment-reporter:12d
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

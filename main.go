@@ -61,6 +61,14 @@ var (
 		[]string{"deployment"},
 	)
 
+	totalRequestsCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests handled",
+		},
+		[]string{"deployment", "endpoint", "method", "status"},
+	)
+
 	metricsCollectionDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "metrics_collection_duration_seconds",
@@ -83,6 +91,7 @@ func init() {
 	prometheus.MustRegister(avgCPUGauge)
 	prometheus.MustRegister(avgMemoryGauge)
 	prometheus.MustRegister(concurrentRequestsGauge)
+	prometheus.MustRegister(totalRequestsCounter)
 	prometheus.MustRegister(metricsCollectionDuration)
 	prometheus.MustRegister(metricsCollectionErrors)
 }
@@ -93,6 +102,57 @@ type AppState struct {
 	clientset        *kubernetes.Clientset
 	metricsClientset *metrics.Clientset
 	promAPI          prometheusv1.API // New field
+	deploymentName   string           // Cache deployment name for metrics
+}
+
+// instrumentedResponseWriter wraps http.ResponseWriter to capture status code
+type instrumentedResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *instrumentedResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// httpInstrumentationMiddleware tracks concurrent requests and total requests
+func (app *AppState) httpInstrumentationMiddleware(endpoint string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get deployment name (use cached value or fallback)
+		deploymentName := app.getDeploymentNameForMetrics()
+
+		// Increment concurrent requests
+		concurrentRequestsGauge.WithLabelValues(deploymentName).Inc()
+		defer concurrentRequestsGauge.WithLabelValues(deploymentName).Dec()
+
+		// Wrap response writer to capture status code
+		wrapped := &instrumentedResponseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK, // Default status
+		}
+
+		// Call the actual handler
+		handler(wrapped, r)
+
+		// Record total requests
+		status := strconv.Itoa(wrapped.statusCode)
+		totalRequestsCounter.WithLabelValues(deploymentName, endpoint, r.Method, status).Inc()
+	}
+}
+
+// getDeploymentNameForMetrics returns deployment name for metrics labeling
+func (app *AppState) getDeploymentNameForMetrics() string {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+
+	if app.deploymentName != "" {
+		return app.deploymentName
+	}
+	if app.Info.DeploymentName != "" {
+		return app.Info.DeploymentName
+	}
+	return "unknown"
 }
 
 func (app *AppState) updateMetrics() {
@@ -134,6 +194,11 @@ func (app *AppState) updateMetrics() {
 	app.Info.DeploymentName = d
 	app.Info.ReadyPods = n
 
+	// Cache deployment name for metrics
+	if d != "" {
+		app.deploymentName = d
+	}
+
 	// Update Prometheus metrics
 	app.updatePrometheusMetrics()
 
@@ -164,11 +229,11 @@ func (app *AppState) updatePrometheusMetrics() {
 	}
 
 	// Update concurrent requests gauge (always set, use 0 for error state)
+	// Note: This field is now kept for JSON API compatibility but not used for Prometheus
 	if app.Info.ConcurrentRequests >= 0 {
-		concurrentRequestsGauge.WithLabelValues(deploymentName).Set(float64(app.Info.ConcurrentRequests))
+		// Keep the JSON field updated for backward compatibility
 	} else {
-		// Set to 0 when there's an error, but still expose the metric
-		concurrentRequestsGauge.WithLabelValues(deploymentName).Set(0)
+		// Keep error state for JSON API
 	}
 }
 
@@ -240,8 +305,8 @@ func main() {
 		}
 	}()
 
-	// Register handlers
-	http.HandleFunc("/", app.metricsHandler)
+	// Register handlers with instrumentation
+	http.HandleFunc("/", app.httpInstrumentationMiddleware("root", app.metricsHandler))
 	http.Handle("/metrics", promhttp.Handler())
 
 	port := "8080"
