@@ -124,7 +124,12 @@ func (app *AppState) httpInstrumentationMiddleware(endpoint string, handler http
 
 		// Increment concurrent requests
 		concurrentRequestsGauge.WithLabelValues(deploymentName).Inc()
-		defer concurrentRequestsGauge.WithLabelValues(deploymentName).Dec()
+		log.Printf("Incremented concurrent requests for deployment: %s", deploymentName)
+
+		defer func() {
+			concurrentRequestsGauge.WithLabelValues(deploymentName).Dec()
+			log.Printf("Decremented concurrent requests for deployment: %s", deploymentName)
+		}()
 
 		// Wrap response writer to capture status code
 		wrapped := &instrumentedResponseWriter{
